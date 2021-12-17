@@ -54,6 +54,8 @@ class Bot:
         self.resistances = []
         self.trigger = None
         self.strategy = kdj_strategy.KDJStrategy()
+        self.candle_keys = ['symbol', 'period', 'open_time', 'volume', 'open', 'high', 'low', 'close']
+        self.indicators = ['K', 'D', 'J']
         print(str(datetime.utcnow()) + ': Reading trading parameters done.', flush=True)
 
         wallet_usd = self.get_wallet()
@@ -388,16 +390,10 @@ class Bot:
                 # Print candle if the candle is new
                 self.df = self.df.append(new_df.iloc[-1], ignore_index=True)
                 self.df, off = self.strategy.populate_indicators(self.df)
-                write_str = str(now) + ' - open_time:' + str(self.df['open_time'].iloc[-1]) + ' open:' + \
-                            str(self.df['open'].iloc[-1]) + ' close:' + str(self.df['close'].iloc[-1]) + ' volume:' + \
-                            str(self.df['volume'].iloc[-1]) + ' high:' + str(self.df['high'].iloc[-1]) + ' low:' + \
-                            str(self.df['low'].iloc[-1])
-                self.write_to_log(write_str)
-                print(write_str, flush=True)
-                write_str = str(now) + ' - K:' + str(self.df.iloc[-1]['K']) + ' D:' + str(self.df.iloc[-1]['D']) + \
-                            ' J:' + str(self.df.iloc[-1]['J'])
-                self.write_to_log(write_str)
-                print(write_str, flush=True)
+                print(self.candle_to_string(), flush=True)
+                self.write_to_log(self.candle_to_string())
+                self.write_to_log(self.indicators_to_string())
+                print(self.indicators_to_string(), flush=True)
 
     def read_historical_data(self):
         self.df = self.get_history_dataframes(2018, 12, 1)
@@ -544,6 +540,22 @@ class Bot:
                 print(write_str + '\n', flush=True)
                 if config.enable_telegram:
                     self.write_telegram_msg(write_str)
+
+    def start_message(self):
+        print(str(datetime.utcnow()) + ': Bot setup done. Start running...', flush=True)
+        print(self.candle_to_string())
+
+    def candle_to_string(self):
+        write_str = str(datetime.utcnow()) + ': '
+        for key in self.candle_keys:
+            write_str += ' - ' + str(key) + ': ' + str(self.df[key].iloc[-1])
+        return write_str
+
+    def indicators_to_string(self):
+        write_str = str(datetime.utcnow()) + ': '
+        for key in self.indicators:
+            write_str += ' - ' + str(key) + ': ' + str(self.df[key].iloc[-1])
+        return write_str
 
     @staticmethod
     def write_telegram_msg(msg):
