@@ -1,4 +1,5 @@
 import config
+from datetime import datetime
 
 
 class KDJStrategy:
@@ -69,8 +70,20 @@ class KDJStrategy:
         # evaluate triggers
         if self.buy_counter == len(config.triggers):
             self.trigger = 'Long'
+            print(str(datetime.now()) + ': evaluated Long trigger')
+            print(str(datetime.now()) + ': Candle 1: open-time: '
+                  + str(datetime.fromtimestamp(df['open_time'].iloc[-3])) + '. K: ' + str(df['K'].iloc[-3]))
+            print(str(datetime.now()) + ': Candle 2: open-time: '
+                  + str(datetime.fromtimestamp(df['open_time'].iloc[-2])) + '. K: ' + str(df['K'].iloc[-2])
+                  + '. Price: ' + str(df['close'].iloc[-1]) + ' USD.')
         elif self.sell_counter == len(config.triggers):
             self.trigger = 'Short'
+            print(str(datetime.now()) + ': evaluated Short trigger')
+            print(str(datetime.now()) + ': Candle 1: open-time: '
+                  + str(datetime.fromtimestamp(df['open_time'].iloc[-3])) + '. K: ' + str(df['K'].iloc[-3]))
+            print(str(datetime.now()) + ': Candle 2: open-time: '
+                  + str(datetime.fromtimestamp(df['open_time'].iloc[-2])) + '. K: ' + str(df['K'].iloc[-2])
+                  + '. Price: ' + str(df['close'].iloc[-1]) + ' USD.')
         else:
             self.trigger = None
 

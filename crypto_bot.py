@@ -6,6 +6,7 @@ import requests
 import datetime as dt
 import calendar
 import time
+from telegram.ext import *
 
 import config
 import kdj_strategy
@@ -45,6 +46,7 @@ class Bot:
 
         print(str(datetime.utcnow()) + ': Reading trading parameters...', flush=True)
         self.trading_mode = mode
+        self.trading_enabled = True
         self.symbol = symbol
         self.max_open_trades = max_trades
         self.time_frame = tf
@@ -56,13 +58,16 @@ class Bot:
         self.strategy = kdj_strategy.KDJStrategy()
         self.candle_keys = ['symbol', 'period', 'open_time', 'volume', 'open', 'high', 'low', 'close']
         self.indicators = ['K', 'D', 'J']
+        self.tel_commands = ["start", "stop", "help", "status", "position", "candle", "history"]
         print(str(datetime.utcnow()) + ': Reading trading parameters done.', flush=True)
 
         wallet_usd = self.get_wallet()
         print(str(datetime.utcnow()) + ': Wallet balance:' + str(wallet_usd) + ' USDT', flush=True)
+
+        self.setup_telegram_bot()
         if config.enable_telegram:
-            self.write_telegram_msg(str(datetime.utcnow()) + ': Crypto Bot started in \"' + config.mode + '\" mode.')
-            self.write_telegram_msg(str(datetime.utcnow()) + ': Wallet balance:' + str(wallet_usd) + ' USDT')
+            self.send_telegram_msg(str(datetime.utcnow()) + ': Crypto Bot started in \"' + config.mode + '\" mode.')
+            self.send_telegram_msg(str(datetime.utcnow()) + ': Wallet balance:' + str(wallet_usd) + ' USDT')
         self.positions = []
         pos = self.get_position(0)
         if len(pos) > 0:
@@ -212,12 +217,46 @@ class Bot:
             self.write_to_log(log_msg)
         return df_history
 
+    def get_order_history(self, lim=50):
+        try:
+            bybit_order_history = self.session.get_active_order(symbol=self.symbol, order_status="Filled",
+                                                                limit=lim)['result']['data']
+            order_history = []
+            for bybit_order in bybit_order_history:
+                yyyy = int(bybit_order['created_time'][:4])
+                mm = int(bybit_order['created_time'][5:7])
+                dd = int(bybit_order['created_time'][8:10])
+                hh = int(bybit_order['created_time'][11:13])
+                mins = int(bybit_order['created_time'][14:16])
+                secs = int(bybit_order['created_time'][17:19])
+                timestamp = datetime.timestamp(datetime(yyyy, mm, dd, hh, mins, secs))
+                order_history.append([bybit_order['created_time'], timestamp, bybit_order['cum_exec_qty'],
+                                      bybit_order['side'], bybit_order['last_exec_price'], bybit_order['stop_loss'],
+                                      bybit_order['take_profit'], bybit_order['reduce_only'],
+                                      bybit_order['cum_exec_fee']])
+
+        except pybit.exceptions.FailedRequestError as ex:
+            self.write_error_log(ex)
+            order_history = []
+        except pybit.exceptions.InvalidRequestError as ex:
+            self.write_error_log(ex)
+            order_history = []
+        except requests.exceptions.Timeout as ex:
+            self.write_error_log(ex)
+            order_history = []
+        except requests.exceptions.ConnectionError as ex:
+            self.write_error_log(ex)
+            order_history = []
+        return order_history
+
     # --- Set Exchange interaction methods ---
     def set_leverage(self):
         try:
-            self.session.set_leverage(symbol=self.symbol,
-                                      buy_leverage=config.leverage,
-                                      sell_leverage=config.leverage)
+
+            self.session.cross_isolated_margin_switch(symbol=self.symbol,
+                                                      is_isolated=True,
+                                                      buy_leverage=config.leverage,
+                                                      sell_leverage=config.leverage)
         except pybit.exceptions.FailedRequestError as ex:
             self.write_error_log(ex)
         except pybit.exceptions.InvalidRequestError as ex:
@@ -390,79 +429,56 @@ class Bot:
                 # Print candle if the candle is new
                 self.df = self.df.append(new_df.iloc[-1], ignore_index=True)
                 self.df, off = self.strategy.populate_indicators(self.df)
-                print(self.candle_to_string(), flush=True)
-                self.write_to_log(self.candle_to_string())
+                print(self.candle_to_string(-2), flush=True)
+                self.write_to_log(self.candle_to_string(-2))
                 self.write_to_log(self.indicators_to_string())
                 print(self.indicators_to_string(), flush=True)
 
     def read_historical_data(self):
         self.df = self.get_history_dataframes(2018, 12, 1)
+        self.df, offset = self.strategy.populate_indicators(self.df)
 
-    def validate_sl_tp(self):
-        for pos in self.positions:
-            max_price = self.df['high'].iloc[-1]
-            min_price = self.df['low'].iloc[-1]
+    def validate_positions(self):
+        if len(self.positions) > len(self.get_position(0)):
+            pos = self.positions[0]
+            print(str(datetime.utcnow()) + ': The following position has been closed:', flush=True)
+            self.print_active_position()
             if len(pos) > 0:
-                sl = pos[5]
-                tp = pos[6]
+                prev_order = self.get_order_history(1)[0]
+                pos.append(prev_order[4])  # close price
                 if pos[3] == 'Long':
-                    if sl != 0.0 and min_price < sl:
-                        print('close Long position due to SL', flush=True)
-                        pos.append(sl)
-                        win_rate = (sl / pos[1] - 1) * pos[4]
-                        pos.append(win_rate)
-                        abs_win = pos[2] * win_rate
-                        pos.append(abs_win)
-                        self.write_trade_log('close', pos)
-                        self.positions.pop()
-                        self.trade_history.append(pos)
-                        self.write_trade_history_log(pos)
-                    if tp != 0.0 and max_price > tp:
-                        print('close Long position due to TP', flush=True)
-                        pos.append(tp)
-                        win_rate = (tp / pos[1] - 1) * pos[4]
-                        pos.append(win_rate)
-                        abs_win = pos[2] * win_rate
-                        pos.append(abs_win)
-                        self.write_trade_log('close', pos)
-                        self.positions.pop()
-                        self.trade_history.append(pos)
-                        self.write_trade_history_log(pos)
+                    win_rate = (prev_order[4] / pos[1] - 1) * pos[4]
+                elif pos[3] == 'Short':
+                    win_rate = (1 - prev_order[4] / pos[1]) * pos[4]
                 else:
-                    if sl != 0.0 and max_price > sl:
-                        print('close Short position due to SL', flush=True)
-                        pos.append(sl)
-                        win_rate = (1 - sl / pos[1]) * pos[4]
-                        pos.append(win_rate)
-                        abs_win = pos[2] * win_rate
-                        pos.append(abs_win)
-                        self.positions.pop()
-                        self.trade_history.append(pos)
-                        self.write_trade_history_log(pos)
-                    if tp != 0.0 and min_price < tp:
-                        print('close Short position due to TP', flush=True)
-                        pos.append(tp)
-                        win_rate = (1 - tp / pos[1]) * pos[4]
-                        pos.append(win_rate)
-                        abs_win = pos[2] * win_rate
-                        pos.append(abs_win)
-                        self.write_trade_log('close', pos)
-                        self.positions.pop()
-                        self.trade_history.append(pos)
-                        self.write_trade_history_log(pos)
+                    win_rate = 1
+                pos.append(win_rate)
+                pos.append(pos[2]*win_rate)
+                self.write_trade_log('close', pos)
+                self.positions.pop()
+                self.trade_history.append(pos)
+                self.write_trade_history_log(pos)
 
     def adjust_stop_loss(self):
-        for position in self.positions:
-            if position[3] == 'Long':
-                if ((self.df['close'].iloc[-1] / position[1]) - 1) > 0.03:
-                    new_sl = (1 + 0.005) * position[1]
+        pos = self.get_position(0)
+        if len(pos) > 0:
+            price = self.get_price()
+            if pos[3] == 'Long':
+                if (price / pos[1]) > 1.03:
+                    new_sl = (1 + 0.005) * pos[1]
+                    write_str = str(datetime.utcnow()) + 'Adjusted stop loss to: ' + str(new_sl) + 'USD \n'
+                    print(write_str, flush=True)
+                    self.write_to_log(write_str)
                     self.set_stop_loss(new_sl, 'Buy')
-                    self.positions[self.positions.index(position)][5] = new_sl
-            elif position[3] == 'Short':
-                if (1 - (self.df['close'].iloc[-1] / position[1])) > 0.03:
-                    new_sl = (1 - 0.005) * position[1]
+                    self.positions[self.positions.index(pos)][5] = new_sl
+            elif pos[3] == 'Short':
+                if (1 - (price / pos[1])) > 0.03:
+                    new_sl = (1 - 0.005) * pos[1]
+                    write_str = str(datetime.utcnow()) + 'Adjusted stop loss to: ' + str(new_sl) + 'USD \n'
+                    print(write_str, flush=True)
+                    self.write_to_log(write_str)
                     self.set_stop_loss(new_sl, 'Sell')
-                    self.positions[self.positions.index(position)][5] = new_sl
+                    self.positions[self.positions.index(pos)][5] = new_sl
 
     # --- Write and print methods ---
     def write_error_log(self, ex):
@@ -470,7 +486,6 @@ class Bot:
         with open(self.error_log, 'a', encoding='utf-8') as f:
             f.write(write_str + '\n')
             f.close()
-        print(write_str, flush=True)
 
     def write_to_log(self, msg):
         with open(self.log, 'a', encoding='utf-8') as f:
@@ -503,8 +518,8 @@ class Bot:
                 f.write(write_str + '\n')
                 f.close()
             if config.enable_telegram:
-                self.write_telegram_msg(write_str)
-                print(write_str, flush=True)
+                self.send_telegram_msg(write_str)
+            print(write_str, flush=True)
 
     def write_trade_history_log(self, position):
         # [0] timestamp opened position
@@ -531,7 +546,7 @@ class Bot:
             write_str = str(datetime.utcnow()) + ': Currently, there are no active positions.'
             print(write_str + '\n', flush=True)
             if config.enable_telegram:
-                self.write_telegram_msg(write_str)
+                self.send_telegram_msg(write_str)
         else:
             for pos in self.positions:
                 write_str = str(datetime.utcnow()) + ': Side: ' + str(pos[3]) + '. Size: ' + str(pos[2]) + \
@@ -539,16 +554,22 @@ class Bot:
                             '. Stop loss: ' + str(pos[5]) + ' USD. Take profit: ' + str(pos[6]) + ' USD.'
                 print(write_str + '\n', flush=True)
                 if config.enable_telegram:
-                    self.write_telegram_msg(write_str)
+                    self.send_telegram_msg(write_str)
 
     def start_message(self):
-        print(str(datetime.utcnow()) + ': Bot setup done. Start running...', flush=True)
-        print(self.candle_to_string())
+        start_msg = str(datetime.utcnow()) + ': Bot setup done. Start running...'
+        candle_report = self.candle_to_string(-2)
+        print(start_msg, flush=True)
+        print(candle_report, flush=True)
+        if config.enable_telegram:
+            self.send_telegram_msg(start_msg)
+            self.send_telegram_msg(candle_report)
 
-    def candle_to_string(self):
+    def candle_to_string(self, pos):
         write_str = str(datetime.utcnow()) + ': '
         for key in self.candle_keys:
-            write_str += ' - ' + str(key) + ': ' + str(self.df[key].iloc[-1])
+            write_str += str(key) + ': ' + str(self.df[key].iloc[pos]) + ', '
+        write_str += 'K: ' + str(self.df['K'].iloc[pos])
         return write_str
 
     def indicators_to_string(self):
@@ -556,13 +577,6 @@ class Bot:
         for key in self.indicators:
             write_str += ' - ' + str(key) + ': ' + str(self.df[key].iloc[-1])
         return write_str
-
-    @staticmethod
-    def write_telegram_msg(msg):
-        send_text = 'https://api.telegram.org/bot' + config.telegram_token + '/sendMessage?chat_id=' + \
-                    config.telegram_chatID + '&parse_mode=Markdown&text=' + msg
-        response = requests.get(send_text)
-        return response.json()
 
     # --- Backtest methods ---
     def convert_backtest_starting_time(self, t):
@@ -756,3 +770,107 @@ class Bot:
             sl = 0.0
             tp = 0.0
         return [open_time, open_price, wallet*config.order_amount, side, config.leverage, sl, tp]
+
+    # --- Telegram methods ---
+    # ["start", "stop", "help", "status", "position", "candle", "history"]
+    @staticmethod
+    def send_telegram_msg(msg):
+        msg = msg.replace('_', '-')
+        send_text = 'https://api.telegram.org/bot' + config.telegram_token + '/sendMessage?chat_id=' + \
+                    config.telegram_chatID + '&parse_mode=Markdown&text=' + msg
+        response = requests.get(send_text)
+        return response.json()
+
+    def setup_telegram_bot(self, timer=0):
+        updater = Updater(config.telegram_token, use_context=True)
+        dp = updater.dispatcher
+        dp.add_handler(CommandHandler(self.tel_commands[0], self.tel_start_trading_command))
+        dp.add_handler(CommandHandler(self.tel_commands[1], self.tel_stop_trading_command))
+        dp.add_handler(CommandHandler(self.tel_commands[2], self.tel_help_command))
+        dp.add_handler(CommandHandler(self.tel_commands[3], self.tel_status_command))
+        dp.add_handler(CommandHandler(self.tel_commands[4], self.tel_position_command))
+        dp.add_handler(CommandHandler(self.tel_commands[5], self.tel_candle_command))
+        dp.add_handler(CommandHandler(self.tel_commands[6], self.tel_trade_history_command))
+        dp.add_handler(MessageHandler(Filters.text, self.tel_handle_message))
+        updater.start_polling(timer)
+
+    def tel_start_trading_command(self, update, context):
+        update.message.reply_text("Enabling trading mode")
+        self.trading_enabled = True
+
+    def tel_stop_trading_command(self, update, context):
+        update.message.reply_text("Disabling trading mode")
+        self.trading_enabled = False
+
+    def tel_help_command(self, update, context):
+        tel_description = ["enables trading mode",
+                           "disables trading mode",
+                           "prints help information",
+                           "prints current status (wallet size, positions, trading status)",
+                           "prints currently open positions",
+                           "prints the latest closed candle and the current candle",
+                           "prints trade history of the past 10 trades"]  # to be defined
+        send_str = "You can use one of the following commands: \n"
+        for i in range(len(self.tel_commands)):
+            send_str += self.tel_commands[i] + " : "
+            send_str += tel_description[i] + "\n"
+        update.message.reply_text(send_str)
+
+    def tel_status_command(self, update, context):
+        send_str = ''
+        if self.trading_enabled:
+            send_str += 'Active trading is enabled. \n'
+        else:
+            send_str += 'Active trading is disabled. \n'
+        send_str += 'Wallet size: ' + str(self.get_wallet()) + ' USDT \n'
+        update.message.reply_text(send_str)
+        self.tel_position_command(update, context)
+
+    def tel_position_command(self, update, context):
+        pos = self.get_position(0)
+        if len(pos) > 0:
+            price = self.get_price()
+            if pos[3] == 'Long':
+                win_rate = (price / pos[1] - 1) * 100
+            else:
+                win_rate = (1 - price / pos[1]) * 100
+            send_str = 'Position type: ' + str(pos[3]) + '\n' + \
+                       'Position size: ' + str(pos[2]) + ' BTC \n' + \
+                       'Open price: ' + str(pos[1]) + ' BTCUSD \n ' + \
+                       'Leverage: ' + str(pos[4]) + '\n' + \
+                       'Take profit: ' + str(pos[6]) + ' USD \n' + \
+                       'Stop loss: ' + str(pos[5]) + ' USD' + \
+                       'Current price' + str(price) + ' USD \n' + \
+                       'Current win rate: ' + str(win_rate) + ' %'
+        else:
+            send_str = 'Currently no open positions.'
+        update.message.reply_text(send_str)
+
+    def tel_candle_command(self, update, context):
+        send_str = 'Latest closed candle: \n'
+        send_str += self.candle_to_string(-2) + '\n'
+        send_str += 'Current candle: \n'
+        send_str += self.candle_to_string(-1)
+        update.message.reply_text(send_str)
+
+    def tel_trade_history_command(self, update, context):
+        # prints trade history of the past 10 trades
+        print(1)
+
+    def tel_handle_message(self, update, context):
+        text = str(update.message.text).lower()
+        if text in ("candle", "update"):
+            send_str = self.candle_to_string(-2)
+        elif text in ("hello", "hi", "sup"):
+            send_str = "Hey! How's it going?"
+        else:
+            send_str = "I don't understand you!"
+        self.send_telegram_msg(send_str)
+
+    @staticmethod
+    def tel_sample_response(self, input_text):
+        user_message = str(input_text).lower()
+        # position, daily report, status
+        if user_message in ("hello", "hi", "sup"):
+            return "Hey! How's it going?"
+        return "I don't understand you!"
