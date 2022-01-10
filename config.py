@@ -12,9 +12,6 @@ dt = 5                      # time between two candle-requests [s]
 timeframe = 240             # Time Frames: [1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, D, W, M] -> to minutes 4h=240min
 
 strategy = "kdj_strategy"   # strategy .py file name
-triggers = ['kdj']          # Triggers used within the strategy: 'macd', 'kdj', ...
-enable_sr_lines = False     # enables support and resistance lines check-up
-sr_range = 0.05             # range in which sr lines will trigger
 enable_dynamic_sl = True    # enables dynamic stop loss modification
 
 plot = False                 # shows backtest plots
