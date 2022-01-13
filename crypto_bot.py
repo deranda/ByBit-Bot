@@ -8,12 +8,13 @@ import calendar
 import time
 from telegram.ext import *
 import sys
+import importlib
 
 import config
 import kdj_strategy
 
 
-# ToDo: Check TakeProfit (seems to be calculated by leverage*config.take_profit)
+# ToDo: telegram close position
 class Bot:
     def __init__(self, api_key=config.api_key, secret_key=config.api_secret, error_log=config.error_file,
                  trade_log=config.trade_file, trade_hist_log=config.trade_hist_file, log=config.log_file,
@@ -65,7 +66,9 @@ class Bot:
         self.strategy = kdj_strategy.KDJStrategy()
         self.candle_keys = ['open_time', 'symbol', 'period', 'volume', 'open', 'high', 'low', 'close']
         self.indicators = ['K', 'D', 'J']
-        self.tel_commands = ["start", "stop", "help", "status", "position", "candle", "history"]
+        self.tel_commands = ["start", "stop", "help", "status", "position", "candle", "history", "closeposition",
+                             "resetwarning"]
+        self.warning_sent = False
 
         wallet_usd = self.get_wallet()
         if config.enable_telegram:
@@ -726,7 +729,6 @@ class Bot:
 
     def validate_bot_running(self):
         candle_validation = [0.0]*10
-        warning_sent = False
         while True:
             candle_validation.pop(0)
             candle_validation.append(float(self.df['volume'].iloc[-1]))
@@ -734,11 +736,11 @@ class Bot:
             for i in range(len(candle_validation)):
                 if candle_validation[0] == candle_validation[i]:
                     validation_counter += 1
-            if validation_counter == len(candle_validation) and not warning_sent:
+            if validation_counter == len(candle_validation) and not self.warning_sent:
                 self.send_telegram_msg(str(datetime.utcnow()) + '(UTC): the volume has not changed during'
                                                                 ' the 10 latest requests. Please check if the bot'
                                                                 ' is still running properly.')
-                warning_sent = True
+                self.warning_sent = True
             time.sleep(config.dt)
 
     def request_command(self):
@@ -761,7 +763,7 @@ class Bot:
         elif command == 1:
             self.trading_enabled = True
             print('enabled active trading. \n', flush=True)
-        elif command == 1:
+        elif command == 2:
             self.trading_enabled = False
             print('disabled active trading. \n', flush=True)
         elif command == 3:
@@ -901,6 +903,8 @@ class Bot:
         return start_date
 
     def backtest(self, t):
+        importlib.reload(config)
+        importlib.reload(kdj_strategy)
         self.positions = []
         buy_trades = [[], []]
         sell_sl_trades = [[], []]
@@ -1019,7 +1023,8 @@ class Bot:
             axs[0].set_xlim(dates_list[0], dates_list[len(dates_list)-1])
 
             axs[1].plot(dates_list, self.df['K'], 'b',
-                        dates_list, self.df['D'], 'r')
+                        dates_list, self.df['boll_upper'], 'r',
+                        dates_list, self.df['boll_lower'], 'g')
             axs[1].grid(b=True, which='major', color='k', linestyle='-')
             axs[1].grid(b=True, which='minor', color='k', linestyle='--')
             axs[1].set_xlim(dates_list[0], dates_list[len(dates_list)-1])
@@ -1028,15 +1033,7 @@ class Bot:
     def backtest_check_sl_tp(self, df_counter, wallet, sl_counter, tp_counter, flat_win_rate, filename):
         for position in self.positions:
             if position[3] == 'Short':
-                if self.df['high'][df_counter - 1] >= position[5]:
-                    win_rate = self.close_backtest_order(position[5],
-                                                         'stop loss',
-                                                         self.df['open_time'][df_counter - 1],
-                                                         filename)
-                    flat_win_rate += win_rate * config.order_amount
-                    wallet += wallet * config.order_amount * win_rate
-                    sl_counter += 1
-                if self.df['high'][df_counter - 1] <= position[6]:
+                if self.df['low'][df_counter - 1] <= position[6]:
                     win_rate = self.close_backtest_order(position[6],
                                                          'take profit',
                                                          self.df['open_time'][df_counter - 1],
@@ -1044,8 +1041,7 @@ class Bot:
                     flat_win_rate += win_rate * config.order_amount
                     wallet += wallet * config.order_amount * win_rate
                     tp_counter += 1
-            elif position[3] == 'Long':
-                if self.df['low'][df_counter - 1] <= position[5]:
+                elif self.df['high'][df_counter - 1] >= position[5]:
                     win_rate = self.close_backtest_order(position[5],
                                                          'stop loss',
                                                          self.df['open_time'][df_counter - 1],
@@ -1053,6 +1049,7 @@ class Bot:
                     flat_win_rate += win_rate * config.order_amount
                     wallet += wallet * config.order_amount * win_rate
                     sl_counter += 1
+            elif position[3] == 'Long':
                 if self.df['high'][df_counter - 1] >= position[6]:
                     win_rate = self.close_backtest_order(position[6],
                                                          'take profit',
@@ -1061,6 +1058,14 @@ class Bot:
                     flat_win_rate += win_rate * config.order_amount
                     wallet += wallet * config.order_amount * win_rate
                     tp_counter += 1
+                elif self.df['low'][df_counter - 1] <= position[5]:
+                    win_rate = self.close_backtest_order(position[5],
+                                                         'stop loss',
+                                                         self.df['open_time'][df_counter - 1],
+                                                         filename)
+                    flat_win_rate += win_rate * config.order_amount
+                    wallet += wallet * config.order_amount * win_rate
+                    sl_counter += 1
         return wallet, sl_counter, tp_counter, flat_win_rate
 
     def close_backtest_order(self, close_price, reason, close_time, file):
@@ -1193,6 +1198,8 @@ class Bot:
         dp.add_handler(CommandHandler(self.tel_commands[4], self.tel_position_command))
         dp.add_handler(CommandHandler(self.tel_commands[5], self.tel_candle_command))
         dp.add_handler(CommandHandler(self.tel_commands[6], self.tel_trade_history_command))
+        dp.add_handler(CommandHandler(self.tel_commands[7], self.tel_close_position))
+        dp.add_handler(CommandHandler(self.tel_commands[8], self.tel_reset_warning))
         dp.add_error_handler(self.tel_error)
         dp.add_handler(MessageHandler(Filters.text, self.tel_handle_message))
         updater.start_polling(poll_interval=timer, timeout=600)
@@ -1212,7 +1219,9 @@ class Bot:
                            "prints current status (wallet size, positions, trading status)",
                            "prints currently open positions",
                            "prints the latest closed candle and the current candle",
-                           "prints trade history of the past 10 trades"]
+                           "prints trade history of the past 10 trades",
+                           "closes an open position",
+                           "resets the bot crash warning"]
         send_str = "You can use one of the following commands: \n"
         for i in range(len(self.tel_commands)):
             send_str += self.tel_commands[i] + " : "
@@ -1269,6 +1278,42 @@ class Bot:
                 nr += 1
         else:
             send_str = 'No trades found in your trading history.'
+        update.message.reply_text(send_str)
+
+    def tel_close_position(self, update, context):
+        send_str = 'Call: close position:\n'
+        pos = self.get_position(0)
+        if len(pos) > 0:
+            price = self.get_price()
+            if pos[3] == 'Long':
+                win_rate = round((price / pos[1] - 1) * 100 * pos[4], 2)
+            else:
+                win_rate = round((1 - price / pos[1]) * 100 * pos[4], 2)
+            send_str += 'Position type: ' + str(pos[3]) + '\n' + \
+                        'Position size: ' + str(pos[2]) + ' BTC \n' + \
+                        'Open price: ' + str(pos[1]) + ' BTCUSD \n' + \
+                        'Leverage: ' + str(pos[4]) + '\n' + \
+                        'Take profit: ' + str(pos[6]) + ' USD \n' + \
+                        'Stop loss: ' + str(pos[5]) + ' USD \n' + \
+                        'Current price: ' + str(price) + ' USD \n' + \
+                        'Current win rate: ' + str(win_rate) + ' %'
+            closed_pos = True
+        else:
+            send_str += 'Currently no open positions.'
+            closed_pos = False
+        self.send_telegram_msg(send_str)
+        self.close_active_position()
+        if closed_pos:
+            send_str = 'Position has been closed'
+        else:
+            send_str = 'There was no position to close'
+        update.message.reply_text(send_str)
+
+    def tel_reset_warning(self, update, context):
+        send_str = 'call: reset warning:'
+        self.send_telegram_msg(send_str)
+        self.warning_sent = False
+        send_str = 'warning thread was set to active'
         update.message.reply_text(send_str)
 
     def tel_handle_message(self, update, context):
